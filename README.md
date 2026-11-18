@@ -10,7 +10,9 @@ The skill files are written for LLMs to parse (YAML frontmatter, XML-tagged bloc
 
 - **Splits every effect into layers:** `L0` anticipation, `L1` core burst, `L2` trails/shockwaves, `L3` debris/sparks, `L4` lingering smoke/residue. It never builds one monolithic effect.
 - **Uses a 2D → 3D hybrid pipeline:** grayscale masks, noise and flipbooks → Python packing → driven in-engine by shaders, particle curves and scripts.
-- **Asks for a 1–10 scale** for quality, time and token budget. These decide layer count, flipbook size, texture packing, and how many sub-agents run.
+- **Asks for a 1–10 scale** for quality, time and token budget, plus a separate **optimization target** (1 = quality first, 10 = strict mobile budgets). Quality decides how much work is done; optimization only decides how hard the shipped version is cut for performance.
+- **Scores its own results** in visual review loops (8 weighted criteria) and keeps refining until it reaches the level's threshold. Higher levels require more loops, concept variants and LOD versions before they can finish.
+- **Uses real fluid simulations** (Blender Mantaflow) for fire, smoke and explosion flipbooks at levels 8–10.
 - **Stops for your approval** before it generates assets or writes engine code. You can skip this by saying "skip approval" or "ไม่ต้อง Approve" in your first message.
 - **Audits performance** (draw calls, particle count, overdraw, texture memory) against budgets for the chosen level.
 
@@ -85,18 +87,27 @@ Run `python scripts/vfx_atlas_packer.py <command> --help` for all options.
 Headless Blender bake (the script is inside `platforms/blender_vfx.md`):
 
 ```bash
+# shader bake (levels 1-7)
 blender -b --factory-startup -P vfx_bake_blender.py -- --out bake/core --effect burst --frames 16 --res 256
+# fluid sim bake (levels 8-10): writes bake/sim/fire and bake/sim/smoke
+blender -b --factory-startup -P vfx_bake_blender.py -- --out bake/sim --effect sim_explosion --frames 64 --res 256 --sim-res 192
 ```
 
 ## Quality scale at a glance
 
-| Level | Result |
-|---|---|
-| 1 | 1–2 layers, static texture or 2x2 flipbook (256 px), basic additive material |
-| 5 | 3–4 layers, 4x4 flipbook + channel-packed noise, UV distortion + lifetime erosion shader |
-| 10 | 5+ synchronized layers, 8x8 flipbooks, baked meshes/flowmaps, RGBA-packed masks, camera shake + light sync |
+| Level | Result | Review loops (pass score) | Typical time |
+|---|---|---|---|
+| 1 | 1–2 layers, static texture or 2x2 flipbook (256 px), basic additive material | 1 self-check | 5–10 min |
+| 5 | 3–4 layers, 4x4 flipbook + channel-packed noise, UV distortion + lifetime erosion shader | ≥ 2 (7.0/10) | 30–60 min |
+| 10 | 5+ synchronized layers, Mantaflow-simulated 8x8 flipbooks (2+ sim variants each), 3 concept variants, RGBA-packed masks, camera shake + light sync, per-layer polish, High/Medium/Low LODs | ≥ 6 (9.0/10, every criterion ≥ 8) | 2–4+ hours |
 
 The final level is the lowest of your quality target and each budget + 2. For example, quality 10 with time budget 5 resolves to level 7.
+
+| Optimization | Budgets | What gets cut |
+|---|---|---|
+| 1–3 (showcase) | PC × 4, report only | nothing |
+| 4–7 (standard) | PC / console | only cuts that cost ≤ 0.5 review score |
+| 8–10 (strict) | mobile | enforced on the Low LOD; the High LOD is never cut |
 
 ## Platform notes
 
@@ -109,7 +120,7 @@ The final level is the lowest of your quality target and each budget + 2. For ex
 | Part | Status |
 |---|---|
 | `vfx_atlas_packer.py` | Tested (alpha extraction, flipbook stitching, size cap, channel packing, error handling) |
-| Blender bake script | Ran headless in Blender 5.2; burst and ring bakes stitched into 4x4 atlases |
+| Blender bake script | Ran headless in Blender 5.2; burst/ring shader bakes and `sim_explosion`/`sim_fire` Mantaflow bakes (fire + smoke passes) stitched into 4x4 atlases |
 | `VfxSequencer.cs` | Compiles against Unity 6000.3 engine assemblies |
 | Luau scripts | Not yet run in Roblox Studio |
 | Shader Graph / particle specs | Written specs; not yet built in a Unity project |

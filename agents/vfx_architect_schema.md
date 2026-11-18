@@ -56,6 +56,8 @@ manifest:
   effect_name: string
   platform: unity | roblox | blender | blender->unity | blender->roblox
   effective_level: int           # 1..10
+  optimization: int              # 1..10 (user answer, STATE_0)
+  budget_profile: showcase | standard | strict
   duration_s: float
   preroll_s: float
   coordinate_space: local | world
@@ -64,7 +66,7 @@ manifest:
   textures:
     - id: string                 # T_<Effect>_<Purpose>, e.g. T_Fireball_CoreFlip
       kind: flipbook | packed_mask | noise | gradient | flowmap | color_sprite
-      source: generate | procedural | blender_bake | user_supplied
+      source: generate | procedural | blender_bake | blender_sim | user_supplied   # blender_sim = Mantaflow (platforms/blender_vfx.md <sim_bake>)
       color_space: srgb | linear
       tileable: bool
       size_px: int               # final atlas/texture size, power of two
@@ -95,7 +97,12 @@ manifest:
     light: {enabled: bool, color_hex: string, peak_intensity: float, range: float, attack_s: float, decay_s: float}
     camera_shake: {enabled: bool, amplitude: float, frequency_hz: float, duration_s: float}
     audio_cue_s: float | null
-  budgets:                       # copied from references/scale_rubric_and_budgets.md for the tier
+  lods:                          # required when effective_level >= 7 (High/Medium/Low); [] otherwise
+    - id: high | medium | low
+      particle_scale: float      # multiplier on every layer max_particles/emission count (high = 1.0)
+      disabled_layers: [string]  # layer ids removed in this LOD
+      texture_overrides: {}      # texture_id -> {size_px: int, grid: int}
+  budgets:                       # references/scale_rubric_and_budgets.md §OPTIMIZATION_PROFILES: tier block x budget_profile
     max_draw_calls: int
     max_live_particles: int
     max_texture_memory_mb: float
@@ -112,12 +119,15 @@ V05 linear color_space for kind in {packed_mask, noise, flowmap}; srgb for color
 V06 exactly one layer has the maximum hdr peak (L1_CoreBurst). L1 enabled always.
 V07 layer count satisfies SKILL.md <layer_model> RULES for effective_level.
 V08 L0 start_s < 0 when enabled; all other start_s >= 0.
-V09 sum over layers of max_particles <= budgets.max_live_particles.
-V10 count of enabled layers + light (if enabled) <= budgets.max_draw_calls.
+V09 sum over layers of max_particles (x audited LOD particle_scale) <= budgets.max_live_particles. showcase: warning only.
+V10 count of enabled layers in the audited LOD + light (if enabled) <= budgets.max_draw_calls. showcase: warning only.
 V11 every layer.texture_id resolves to textures[].id.
 V12 alpha_over_life ends at 0 for every layer (no pop-out). size/alpha keypoints t sorted in [0,1].
 V13 render_order unique per layer; L4 lowest (behind), L1 highest unless design states otherwise.
 V14 flipbook.frames_source >= grid^2 OR pipeline uses --frame-policy even with --pad-mode hold.
+V15 effective_level >= 8: every fire/smoke/explosion flipbook has source blender_sim (procedural shader bakes are levels 1-7 only).
+V16 effective_level >= 7: lods contains high, medium (level >= 8) and low; high has particle_scale 1.0 and no disabled_layers; low keeps L1.
+V17 budget_profile matches optimization (1-3 showcase, 4-7 standard, 8-10 strict); budgets = tier block x profile, checked against the audited LOD.
 On failure: list failing rule IDs, auto-fix, re-validate. Report fixes in one line each.
 </VALIDATION_RULES>
 
@@ -144,6 +154,8 @@ manifest:
   effect_name: FireballImpact
   platform: roblox
   effective_level: 6
+  optimization: 5
+  budget_profile: standard
   duration_s: 1.2
   preroll_s: 0.25
   coordinate_space: world
@@ -204,6 +216,7 @@ manifest:
     light: {enabled: true, color_hex: "#FF8A1F", peak_intensity: 6, range: 16, attack_s: 0.03, decay_s: 0.5}
     camera_shake: {enabled: true, amplitude: 0.35, frequency_hz: 18, duration_s: 0.3}
     audio_cue_s: 0.0
+  lods: []
   budgets: {max_draw_calls: 6, max_live_particles: 150, max_texture_memory_mb: 12, max_overdraw_layers: 4}
 ```
 NOTE (Roblox, V10): Beam/Trail/ParticleEmitter instances are batched by the engine differently from Unity draw calls; max_draw_calls is interpreted as "max distinct emitter/beam/trail instances" on roblox.

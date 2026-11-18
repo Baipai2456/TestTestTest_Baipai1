@@ -49,6 +49,7 @@ DECISION TABLE:
 | gradient | false | procedural (`disc`, `ring`, `streak`) | — |
 | color_sprite | false | procedural + extract-alpha --white-rgb | generator |
 | flipbook | false | Blender bake (platforms/blender_vfx.md) | generator sequence (§FLIPBOOK_PROMPTS) |
+| flipbook: fire / smoke / explosion, level >= 8 | false | Blender Mantaflow sim (`sim_explosion` / `sim_fire`, platforms/blender_vfx.md <sim_bake>) | none: never substitute a shader bake or generated frames at level >= 8 |
 | flowmap | true/false | Blender bake | — (never generate flowmaps with image models: vectors must be exact) |
 RULES:
 - Image models cannot guarantee temporal consistency. For flipbooks at effective_level >= 5 prefer Blender bake. Use generated sequences only for effective_level <= 4 or stylized effects that tolerate boil.

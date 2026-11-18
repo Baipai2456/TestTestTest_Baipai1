@@ -93,14 +93,41 @@ Exception: platform=roblox AND Lighting.Bloom unavailable in target experience -
 | Color depth | 8-bit PNG for engine; 16-bit only for intermediate data maps |
 | Tileable noise | do not bake in Blender; use agents/asset_subagent_prompts.md §PROCEDURAL_FALLBACK (exact periodicity) |
 | Flowmap | Emission = (flow.xy * 0.5 + 0.5, 0) from Vector Math on a Tangent/Vector field; Non-Color; film transparent OFF; 16-bit PNG; Unity import sRGB OFF |
+| Sim effects | side view (camera at -Y), gravity/buoyancy read vertically; fire and smoke rendered as separate passes from one cache |
 </ortho_bake_rules>
 
+<sim_bake name="Mantaflow fluid flipbooks" required_for="effective_level >= 8 fire/smoke/explosion layers">
+Procedural shader bakes (`burst`, `ring`) are levels 1-7. Levels 8-10 MUST source fire, smoke and explosion flipbooks from a real gas simulation (`sim_explosion`, `sim_fire`). This is the main quality jump: real advection, vorticity, breakup and self-shadowing density.
+PASSES: `<out>/fire/` = flame emission on black (RGB, additive -> `extract-alpha`), `<out>/smoke/` = density only (RGBA, alpha -> stitch directly). Ship them as separate engine layers (fire = L1 additive, smoke = L4 alpha).
+| Level | --sim-res | --frames | --sim-step | --res (cell) | Typical bake+render time (one variant, desktop GPU) |
+|---|---|---|---|---|---|
+| preview / iteration | 48-64 | 16 | 2 | 128 | < 1 min |
+| 8 | 128 | 16-64 | 2 | 256 | 5-20 min |
+| 9 | 192 | 64 | 2-3 | 256 (render 512, downsample) | 20-60 min |
+| 10 | 256-384 | 64 | 3 | 256 (render 512, downsample) | 1-3 h per variant |
+ITERATION RULE: tune at preview res (fast), then final bake at the level's res. Never final-bake an untuned sim.
+TUNING KNOBS (edit in `build_sim`; record values in manifest.textures[].pipeline):
+| Symptom | Knob |
+|---|---|
+| blast too small / slow expansion | flow `velocity_normal` up (20 -> 30), emitter radius up |
+| flames die early, empty last cells | domain `burning_rate` down (0.35 -> 0.2), flow `fuel_amount` up |
+| flames last too long | `burning_rate` up |
+| smoke leaves top of frame | domain `beta` down, emitter lower, fewer frames, or larger ortho_scale |
+| blobby, no detail | `--sim-res` up; domain `vorticity` / `flame_vorticity` up |
+| emitter keeps leaking after burst | emitter must be keyed OUT of the domain (scale-to-zero still emits) |
+| smoke too faint / too dense | smoke material density multiplier (15) |
+| fire too dim / blown out | fire material emission multiplier (12) |
+VERIFIED (Blender 5.2): `sim_explosion` at sim-res 64, 16 frames -> fire pass fills 15/16 cells with breakup, smoke pass evolves separately; `sim_fire` runs.
+</sim_bake>
+
 <bake_script file="tools/vfx_bake_blender.py (write to the user's project when needed)">
-Headless: `blender -b --factory-startup -P vfx_bake_blender.py -- --out <dir> --effect burst|ring --frames 16 --res 256 --mode additive|alpha [--color-hot FFF4D6 --color-mid FF8A1F --color-cool 7A1400 --seed 0]`
-Outputs `<dir>/frame_0001.png ...`. Verified on Blender 5.2: 16-frame burst and ring bakes stitched into 4x4 atlases with readable attack/decay.
+Headless: `blender -b --factory-startup -P vfx_bake_blender.py -- --out <dir> --effect burst|ring|sim_explosion|sim_fire --frames 16 --res 256 --mode additive|alpha [--sim-res 64 --sim-step 2] [--color-hot FFF4D6 --color-mid FF8A1F --color-cool 7A1400 --color-smoke 3A3A3A --seed 0]`
+Outputs `<dir>/frame_0001.png ...` (burst/ring) or `<dir>/fire/frame_*.png` + `<dir>/smoke/frame_*.png` (sim; `--mode` ignored). Verified on Blender 5.2: burst/ring stitched into 4x4 atlases; sim_explosion and sim_fire baked and rendered both passes.
 ```python
 # vfx_bake_blender.py - headless orthographic flipbook bake (Blender 4.2 LTS .. 5.x)
 # usage: blender -b --factory-startup -P vfx_bake_blender.py -- --out ./frames --effect burst --frames 16 --res 256 --mode additive
+#        sim effects (Mantaflow, level 8-10) write <out>/fire (additive RGB on black) and <out>/smoke (RGBA):
+#        blender -b --factory-startup -P vfx_bake_blender.py -- --out ./bake --effect sim_explosion --frames 64 --res 256 --sim-res 192
 import argparse
 import math
 import sys
@@ -111,7 +138,7 @@ import bpy
 argv = sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else []
 ap = argparse.ArgumentParser()
 ap.add_argument("--out", required=True)
-ap.add_argument("--effect", choices=["burst", "ring"], default="burst")
+ap.add_argument("--effect", choices=["burst", "ring", "sim_explosion", "sim_fire"], default="burst")
 ap.add_argument("--frames", type=int, default=16)          # = grid*grid (4, 16, 64)
 ap.add_argument("--res", type=int, default=256)            # = cell px; power of two
 ap.add_argument("--mode", choices=["additive", "alpha"], default="additive")
@@ -119,6 +146,9 @@ ap.add_argument("--color-hot", default="FFF4D6")
 ap.add_argument("--color-mid", default="FF8A1F")
 ap.add_argument("--color-cool", default="7A1400")
 ap.add_argument("--seed", type=float, default=0.0)
+ap.add_argument("--color-smoke", default="3A3A3A")
+ap.add_argument("--sim-res", type=int, default=64)        # Mantaflow divisions: 64 preview, 128 L8, 192 L9, 256+ L10 (hours)
+ap.add_argument("--sim-step", type=int, default=2)        # simulate frames*step, render every step-th frame (smoother motion)
 ap.add_argument("--no-render", action="store_true")
 A = ap.parse_args(argv)
 
@@ -315,10 +345,101 @@ def build_ring():
     return ob
 
 
-build_burst() if A.effect == "burst" else build_ring()
+def volume_material(pass_name):
+    """fire: flame attribute -> emission ramp, no density. smoke: density only, no emission. Separate passes = separate engine layers."""
+    mat = bpy.data.materials.new(f"VFX_Sim_{pass_name}")
+    if mat.node_tree is None:
+        mat.use_nodes = True
+    nt = mat.node_tree
+    nt.nodes.clear()
+    N, L = nt.nodes.new, nt.links.new
+    out = N("ShaderNodeOutputMaterial")
+    vol = N("ShaderNodeVolumePrincipled")
+    L(vol.outputs[0], out.inputs["Volume"])
+    vol.inputs["Blackbody Intensity"].default_value = 0.0
+    attr = N("ShaderNodeAttribute")
+    if pass_name == "fire":
+        attr.attribute_name = "flame"
+        vol.inputs["Density"].default_value = 0.0
+        ramp = N("ShaderNodeValToRGB"); el = ramp.color_ramp.elements
+        el[0].position, el[0].color = 0.0, hex_rgba(A.color_cool)
+        el[1].position, el[1].color = 1.0, hex_rgba(A.color_hot)
+        el.new(0.45).color = hex_rgba(A.color_mid)
+        L(attr.outputs["Fac"], ramp.inputs["Fac"]); L(ramp.outputs["Color"], vol.inputs["Emission Color"])
+        k = N("ShaderNodeMath"); k.operation = "MULTIPLY"; k.inputs[1].default_value = 12.0
+        L(attr.outputs["Fac"], k.inputs[0]); L(k.outputs[0], vol.inputs["Emission Strength"])
+    else:
+        attr.attribute_name = "density"
+        vol.inputs["Color"].default_value = hex_rgba(A.color_smoke)
+        k = N("ShaderNodeMath"); k.operation = "MULTIPLY"; k.inputs[1].default_value = 15.0
+        L(attr.outputs["Fac"], k.inputs[0]); L(k.outputs[0], vol.inputs["Density"])
+        vol.inputs["Emission Strength"].default_value = 0.0
+    return mat
+
+
+def build_sim():
+    """Mantaflow gas sim, side view. Bake once, render fire + smoke passes from the same cache."""
+    cam.location, cam.rotation_euler = (0, -5, 0), (math.pi / 2, 0, 0)   # side view: gravity/buoyancy reads vertically
+    step = max(1, A.sim_step)
+    sim_end = A.frames * step
+    sc.frame_start, sc.frame_end, sc.frame_step = 1, sim_end, step
+    bpy.ops.mesh.primitive_cube_add(size=2.0)                             # domain fills the ortho frame [-1,1]
+    dom = bpy.context.active_object
+    ds_mod = dom.modifiers.new("Fluid", "FLUID"); ds_mod.fluid_type = "DOMAIN"
+    ds = ds_mod.domain_settings
+    ds.domain_type = "GAS"
+    ds.resolution_max = A.sim_res
+    ds.cache_type = "ALL"
+    ds.cache_frame_start, ds.cache_frame_end = 1, sim_end
+    ds.cache_directory = str(Path(A.out).resolve() / "_cache")
+    ds.vorticity = 0.35
+    ds.flame_vorticity = 0.6
+    explosion = A.effect == "sim_explosion"
+    ds.beta = 0.6 if explosion else 1.5                                   # heat buoyancy: low keeps the blast in frame
+    ds.burning_rate = 0.35 if explosion else 0.75                         # slower burn = flames survive the whole flipbook
+    for side in ("front", "back", "right", "left", "top"):
+        setattr(ds, f"use_collision_border_{side}", False)                # open borders: no smoke piling at walls
+    bpy.ops.mesh.primitive_ico_sphere_add(radius=0.3 if explosion else 0.25, location=(0, 0, -0.15 if explosion else -0.8))
+    em = bpy.context.active_object
+    em.hide_render = True
+    fl_mod = em.modifiers.new("Fluid", "FLUID"); fl_mod.fluid_type = "FLOW"
+    fs = fl_mod.flow_settings
+    fs.flow_type = "BOTH"
+    fs.flow_behavior = "INFLOW"
+    fs.flow_source = "MESH"
+    fs.fuel_amount = 3.0 if explosion else 1.0
+    fs.temperature = 3.0 if explosion else 2.0
+    fs.use_initial_velocity = True
+    fs.velocity_normal = 20.0 if explosion else 0.5
+    if explosion:                                                         # short burst: teleport emitter out of the domain (scaling to ~0 still emits)
+        cut = max(2, round(sim_end * 0.06))
+        em.keyframe_insert("location", frame=cut)
+        em.location = (0, 0, -10); em.keyframe_insert("location", frame=cut + 1)
+        set_interp(em, "CONSTANT")
+    ee = sc.eevee
+    for attr, val in (("volumetric_tile_size", "2"), ("volumetric_samples", 64), ("volumetric_start", 0.1), ("volumetric_end", 20.0)):
+        if hasattr(ee, attr):
+            setattr(ee, attr, val)
+    with bpy.context.temp_override(object=dom, active_object=dom, selected_objects=[dom]):
+        bpy.ops.fluid.bake_all()
+    return dom
+
+
 Path(A.out).mkdir(parents=True, exist_ok=True)
-if not A.no_render:
-    bpy.ops.render.render(animation=True)
+if A.effect.startswith("sim_"):
+    dom = build_sim()
+    for pass_name, alpha in (("fire", False), ("smoke", True)):
+        dom.data.materials.clear()
+        dom.data.materials.append(volume_material(pass_name))
+        sc.render.film_transparent = alpha
+        sc.render.image_settings.color_mode = "RGBA" if alpha else "RGB"
+        sc.render.filepath = str(Path(A.out).resolve() / pass_name / "frame_")
+        if not A.no_render:
+            bpy.ops.render.render(animation=True)
+else:
+    build_burst() if A.effect == "burst" else build_ring()
+    if not A.no_render:
+        bpy.ops.render.render(animation=True)
 print(f"[bake] done effect={A.effect} frames={A.frames} res={A.res} mode={A.mode} -> {A.out}")
 ```
 </bake_script>
@@ -335,6 +456,12 @@ python scripts/vfx_atlas_packer.py extract-alpha bake/core alpha/core --mode max
 python scripts/vfx_atlas_packer.py stitch-flipbook alpha/core out/T_FX_Core.png --grid 8x8 --cell 256 --max-size 2048 --padding 2
 # 2c) Smoke rendered with --mode alpha: stitch directly
 python scripts/vfx_atlas_packer.py stitch-flipbook bake/smoke out/T_FX_Smoke.png --grid 4x4 --max-size 1024 --padding 2
+# 3) Level 8-10 sim: preview tune, then final bake (fire + smoke passes)
+blender -b --factory-startup -P tools/vfx_bake_blender.py -- --out bake/sim_preview --effect sim_explosion --frames 16 --res 128 --sim-res 64
+blender -b --factory-startup -P tools/vfx_bake_blender.py -- --out bake/sim --effect sim_explosion --frames 64 --res 512 --sim-res 256 --sim-step 3
+python scripts/vfx_atlas_packer.py extract-alpha bake/sim/fire alpha/fire --mode max
+python scripts/vfx_atlas_packer.py stitch-flipbook alpha/fire out/T_FX_Fire.png --grid 8x8 --cell 256 --max-size 2048 --padding 2
+python scripts/vfx_atlas_packer.py stitch-flipbook bake/sim/smoke out/T_FX_SimSmoke.png --grid 8x8 --cell 256 --max-size 2048 --padding 2
 ```
 MESH EXPORT (rings/trails/shards):
 | Target | Settings |
