@@ -13,6 +13,7 @@ deliverables: [texture import table, Shader Graph blueprint, particle module con
 | Setting | Location | Value | Why |
 |---|---|---|---|
 | Depth Texture | URP Asset > Rendering | ON | Soft particles / Depth Fade (Scene Depth node) |
+| Opaque Texture | URP Asset > Rendering | ON only if heat-haze refraction layer exists | Scene Color node |
 | HDR | URP Asset > Quality | ON | Emission > 1.0 feeds Bloom |
 | Bloom | Global Volume > Bloom | Threshold 0.9-1.1, Intensity 0.5-1.5 | HDR core reads as glow |
 | Tonemapping | Global Volume | ACES or Neutral (match game) | Predictable HDR roll-off |
